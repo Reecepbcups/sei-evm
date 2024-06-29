@@ -1,21 +1,19 @@
 package ante
 
 import (
-	"encoding/hex"
-	"errors"
 	"fmt"
 	"math/big"
 
+	"cosmossdk.io/errors"
+	storetypes "cosmossdk.io/store/types"
 	"github.com/btcsuite/btcd/btcec"
 	"github.com/cosmos/cosmos-sdk/crypto/keys/secp256k1"
 	cryptotypes "github.com/cosmos/cosmos-sdk/crypto/types"
 	sdk "github.com/cosmos/cosmos-sdk/types"
-	sdkacltypes "github.com/cosmos/cosmos-sdk/types/accesscontrol"
 	sdkerrors "github.com/cosmos/cosmos-sdk/types/errors"
 	accountkeeper "github.com/cosmos/cosmos-sdk/x/auth/keeper"
 	authsigning "github.com/cosmos/cosmos-sdk/x/auth/signing"
 	authtypes "github.com/cosmos/cosmos-sdk/x/auth/types"
-	banktypes "github.com/cosmos/cosmos-sdk/x/bank/types"
 	"github.com/ethereum/go-ethereum/common"
 	ethtypes "github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
@@ -61,7 +59,7 @@ func (p *EVMPreprocessDecorator) AnteHandle(ctx sdk.Context, tx sdk.Tx, simulate
 	}
 
 	// use infinite gas meter for EVM transaction because EVM handles gas checking from within
-	ctx = ctx.WithGasMeter(sdk.NewInfiniteGasMeterWithMultiplier(ctx))
+	ctx = ctx.WithGasMeter(storetypes.NewInfiniteGasMeterWithMultiplier(ctx.GasMeter()))
 
 	derived := msg.Derived
 	seiAddr := derived.SenderSeiAddr
@@ -73,12 +71,12 @@ func (p *EVMPreprocessDecorator) AnteHandle(ctx sdk.Context, tx sdk.Tx, simulate
 	isAssociateTx := derived.IsAssociate
 	_, isAssociated := p.evmKeeper.GetEVMAddress(ctx, seiAddr)
 	if isAssociateTx && isAssociated {
-		return ctx, sdkerrors.Wrap(sdkerrors.ErrInvalidRequest, "account already has association set")
+		return ctx, errors.Wrap(sdkerrors.ErrInvalidRequest, "account already has association set")
 	} else if isAssociateTx {
 		// check if the account has enough balance (without charging)
 		if !p.IsAccountBalancePositive(ctx, seiAddr, evmAddr) {
 			// metrics.IncrementAssociationError("associate_tx_insufficient_funds", evmtypes.NewAssociationMissingErr(seiAddr.String()))
-			return ctx, sdkerrors.Wrap(sdkerrors.ErrInsufficientFunds, "account needs to have at least 1 wei to force association")
+			return ctx, errors.Wrap(sdkerrors.ErrInsufficientFunds, "account needs to have at least 1 wei to force association")
 		}
 		if err := p.AssociateAddresses(ctx, seiAddr, evmAddr, pubkey); err != nil {
 			return ctx, err
@@ -190,57 +188,60 @@ func Preprocess(ctx sdk.Context, msgEVMTransaction *evmtypes.MsgEVMTransaction) 
 	return nil
 }
 
-func (p *EVMPreprocessDecorator) AnteDeps(txDeps []sdkacltypes.AccessOperation, tx sdk.Tx, txIndex int, next sdk.AnteDepGenerator) (newTxDeps []sdkacltypes.AccessOperation, err error) {
-	msg := evmtypes.MustGetEVMTransactionMessage(tx)
-	return next(append(txDeps, sdkacltypes.AccessOperation{
-		AccessType:         sdkacltypes.AccessType_READ,
-		ResourceType:       sdkacltypes.ResourceType_KV_EVM_S2E,
-		IdentifierTemplate: hex.EncodeToString(evmtypes.SeiAddressToEVMAddressKey(msg.Derived.SenderSeiAddr)),
-	}, sdkacltypes.AccessOperation{
-		AccessType:         sdkacltypes.AccessType_WRITE,
-		ResourceType:       sdkacltypes.ResourceType_KV_EVM_S2E,
-		IdentifierTemplate: hex.EncodeToString(evmtypes.SeiAddressToEVMAddressKey(msg.Derived.SenderSeiAddr)),
-	}, sdkacltypes.AccessOperation{
-		AccessType:         sdkacltypes.AccessType_WRITE,
-		ResourceType:       sdkacltypes.ResourceType_KV_EVM_E2S,
-		IdentifierTemplate: hex.EncodeToString(evmtypes.EVMAddressToSeiAddressKey(msg.Derived.SenderEVMAddr)),
-	}, sdkacltypes.AccessOperation{
-		AccessType:         sdkacltypes.AccessType_READ,
-		ResourceType:       sdkacltypes.ResourceType_KV_BANK_BALANCES,
-		IdentifierTemplate: hex.EncodeToString(banktypes.CreateAccountBalancesPrefix(msg.Derived.SenderSeiAddr)),
-	}, sdkacltypes.AccessOperation{
-		AccessType:         sdkacltypes.AccessType_WRITE,
-		ResourceType:       sdkacltypes.ResourceType_KV_BANK_BALANCES,
-		IdentifierTemplate: hex.EncodeToString(banktypes.CreateAccountBalancesPrefix(msg.Derived.SenderSeiAddr)),
-	}, sdkacltypes.AccessOperation{
-		AccessType:         sdkacltypes.AccessType_READ,
-		ResourceType:       sdkacltypes.ResourceType_KV_BANK_BALANCES,
-		IdentifierTemplate: hex.EncodeToString(banktypes.CreateAccountBalancesPrefix(msg.Derived.SenderEVMAddr[:])),
-	}, sdkacltypes.AccessOperation{
-		AccessType:         sdkacltypes.AccessType_WRITE,
-		ResourceType:       sdkacltypes.ResourceType_KV_BANK_BALANCES,
-		IdentifierTemplate: hex.EncodeToString(banktypes.CreateAccountBalancesPrefix(msg.Derived.SenderEVMAddr[:])),
-	}, sdkacltypes.AccessOperation{
-		AccessType:         sdkacltypes.AccessType_READ,
-		ResourceType:       sdkacltypes.ResourceType_KV_AUTH_ADDRESS_STORE,
-		IdentifierTemplate: hex.EncodeToString(authtypes.AddressStoreKey(msg.Derived.SenderSeiAddr)),
-	}, sdkacltypes.AccessOperation{
-		AccessType:         sdkacltypes.AccessType_WRITE,
-		ResourceType:       sdkacltypes.ResourceType_KV_AUTH_ADDRESS_STORE,
-		IdentifierTemplate: hex.EncodeToString(authtypes.AddressStoreKey(msg.Derived.SenderSeiAddr)),
-	}, sdkacltypes.AccessOperation{
-		AccessType:         sdkacltypes.AccessType_READ,
-		ResourceType:       sdkacltypes.ResourceType_KV_AUTH_ADDRESS_STORE,
-		IdentifierTemplate: hex.EncodeToString(authtypes.AddressStoreKey(msg.Derived.SenderEVMAddr[:])),
-	}, sdkacltypes.AccessOperation{
-		AccessType:         sdkacltypes.AccessType_WRITE,
-		ResourceType:       sdkacltypes.ResourceType_KV_AUTH_ADDRESS_STORE,
-		IdentifierTemplate: hex.EncodeToString(authtypes.AddressStoreKey(msg.Derived.SenderEVMAddr[:])),
-	}, sdkacltypes.AccessOperation{
-		AccessType:         sdkacltypes.AccessType_READ,
-		ResourceType:       sdkacltypes.ResourceType_KV_EVM_NONCE,
-		IdentifierTemplate: hex.EncodeToString(append(evmtypes.NonceKeyPrefix, msg.Derived.SenderEVMAddr[:]...)),
-	}), tx, txIndex)
+// TODO: I do not think this applies to normal networks
+func (p *EVMPreprocessDecorator) AnteDeps(tx sdk.Tx, txIndex int, next sdk.AnteDepGenerator) (err error) {
+	panic("p *EVMPreprocessDecorator) AnteDeps implement me")
+	// msg := evmtypes.MustGetEVMTransactionMessage(tx)
+	// return next(append(txDeps, sdkacltypes.AccessOperation{
+	// 	AccessType:         sdkacltypes.AccessType_READ,
+	// 	ResourceType:       sdkacltypes.ResourceType_KV_EVM_S2E,
+	// 	IdentifierTemplate: hex.EncodeToString(evmtypes.SeiAddressToEVMAddressKey(msg.Derived.SenderSeiAddr)),
+	// }, sdkacltypes.AccessOperation{
+	// 	AccessType:         sdkacltypes.AccessType_WRITE,
+	// 	ResourceType:       sdkacltypes.ResourceType_KV_EVM_S2E,
+	// 	IdentifierTemplate: hex.EncodeToString(evmtypes.SeiAddressToEVMAddressKey(msg.Derived.SenderSeiAddr)),
+	// }, sdkacltypes.AccessOperation{
+	// 	AccessType:         sdkacltypes.AccessType_WRITE,
+	// 	ResourceType:       sdkacltypes.ResourceType_KV_EVM_E2S,
+	// 	IdentifierTemplate: hex.EncodeToString(evmtypes.EVMAddressToSeiAddressKey(msg.Derived.SenderEVMAddr)),
+	// }, sdkacltypes.AccessOperation{
+	// 	AccessType:         sdkacltypes.AccessType_READ,
+	// 	ResourceType:       sdkacltypes.ResourceType_KV_BANK_BALANCES,
+	// 	IdentifierTemplate: hex.EncodeToString(banktypes.CreateAccountBalancesPrefix(msg.Derived.SenderSeiAddr)),
+	// }, sdkacltypes.AccessOperation{
+	// 	AccessType:         sdkacltypes.AccessType_WRITE,
+	// 	ResourceType:       sdkacltypes.ResourceType_KV_BANK_BALANCES,
+	// 	IdentifierTemplate: hex.EncodeToString(banktypes.CreateAccountBalancesPrefix(msg.Derived.SenderSeiAddr)),
+	// }, sdkacltypes.AccessOperation{
+	// 	AccessType:         sdkacltypes.AccessType_READ,
+	// 	ResourceType:       sdkacltypes.ResourceType_KV_BANK_BALANCES,
+	// 	IdentifierTemplate: hex.EncodeToString(banktypes.CreateAccountBalancesPrefix(msg.Derived.SenderEVMAddr[:])),
+	// }, sdkacltypes.AccessOperation{
+	// 	AccessType:         sdkacltypes.AccessType_WRITE,
+	// 	ResourceType:       sdkacltypes.ResourceType_KV_BANK_BALANCES,
+	// 	IdentifierTemplate: hex.EncodeToString(banktypes.CreateAccountBalancesPrefix(msg.Derived.SenderEVMAddr[:])),
+	// }, sdkacltypes.AccessOperation{
+	// 	AccessType:         sdkacltypes.AccessType_READ,
+	// 	ResourceType:       sdkacltypes.ResourceType_KV_AUTH_ADDRESS_STORE,
+	// 	IdentifierTemplate: hex.EncodeToString(authtypes.AddressStoreKey(msg.Derived.SenderSeiAddr)),
+	// }, sdkacltypes.AccessOperation{
+	// 	AccessType:         sdkacltypes.AccessType_WRITE,
+	// 	ResourceType:       sdkacltypes.ResourceType_KV_AUTH_ADDRESS_STORE,
+	// 	IdentifierTemplate: hex.EncodeToString(authtypes.AddressStoreKey(msg.Derived.SenderSeiAddr)),
+	// }, sdkacltypes.AccessOperation{
+	// 	AccessType:         sdkacltypes.AccessType_READ,
+	// 	ResourceType:       sdkacltypes.ResourceType_KV_AUTH_ADDRESS_STORE,
+	// 	IdentifierTemplate: hex.EncodeToString(authtypes.AddressStoreKey(msg.Derived.SenderEVMAddr[:])),
+	// }, sdkacltypes.AccessOperation{
+	// 	AccessType:         sdkacltypes.AccessType_WRITE,
+	// 	ResourceType:       sdkacltypes.ResourceType_KV_AUTH_ADDRESS_STORE,
+	// 	IdentifierTemplate: hex.EncodeToString(authtypes.AddressStoreKey(msg.Derived.SenderEVMAddr[:])),
+	// }, sdkacltypes.AccessOperation{
+	// 	AccessType:         sdkacltypes.AccessType_READ,
+	// 	ResourceType:       sdkacltypes.ResourceType_KV_EVM_NONCE,
+	// 	IdentifierTemplate: hex.EncodeToString(append(evmtypes.NonceKeyPrefix, msg.Derived.SenderEVMAddr[:]...)),
+	// }), tx, txIndex)
+	return nil
 }
 
 func getAddresses(V *big.Int, R *big.Int, S *big.Int, data common.Hash) (common.Address, sdk.AccAddress, cryptotypes.PubKey, error) {
